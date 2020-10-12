@@ -76,6 +76,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # IPython
 profile_default/
@@ -131,3 +132,6 @@ dmypy.json
 # IDEs
 .vscode
 .idea
+
+# MacOS
+.DS_Store
