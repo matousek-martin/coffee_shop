@@ -22,6 +22,10 @@ class StoryousSpider(scrapy.Spider, metaclass=ABCMeta):
         self._source_id = f"{os.environ['MERCHANT_ID']}-{os.environ['PLACE_ID']}"
         self._authorization = {'Authorization': f'Bearer {self.__get_token()}'}
 
+    def errback(self, response):
+        if response.value.response.status == 401:
+            raise CloseSpider('Session  limit reached')
+
     @staticmethod
     def _get_database(path: str) -> TinyDB:
         db_path = get_project_root() / Path(path)
@@ -43,33 +47,39 @@ class StoryousSpider(scrapy.Spider, metaclass=ABCMeta):
         return token
 
 
-# TODO Implement in Scrapy
 class BillsSpider(StoryousSpider):
     name = 'bills_spider'
 
     def __init__(self):
         super(BillsSpider, self).__init__()
         self._database = self._get_database('data/raw/bills.json')
+        self._scraped_ids = [bill['billId'] for bill in self._database.all()]
 
-    def run(self):
-        # Set next page for first API call
-        next_page = f"bills/{self._source_id}"
+    def start_requests(self):
+        url = f"https://api.storyous.com/bills/{self._source_id}"
+        yield scrapy.Request(
+            url=url,
+            headers=self._authorization,
+            callback=self.parse,
+            errback=self.errback
+        )
 
-        # Add all bills to database
-        while next_page:
-            bills = self.__get_bills(suffix=next_page)
-            self._database.insert_multiple(bills['data'])
+    def parse(self, response):
+        # Add bills to database
+        bills = response.json()
+        self._database.insert_multiple(bills['data'])
 
-            if 'nextPage' in bills:
-                next_page = bills['nextPage'][1:]
-            else:
-                next_page = None
-
-    def __get_bills(self, suffix: str) -> dict:
-        # Each call retrieves 100 entries
-        url = f"https://api.storyous.com/{suffix}"
-        response = requests.get(url=url, headers=self._authorization)
-        return response.json()
+        # Stop when we encounter an already scraped bill id
+        last_bill_id = bills['data'][-1]['billId']
+        stop_spider = last_bill_id in self._scraped_ids
+        if 'nextPage' in bills and stop_spider is False:
+            next_page = bills['nextPage'][1:]
+            yield response.follow(
+                url=next_page,
+                headers=self._authorization,
+                callback=self.parse,
+                errback=self.errback
+            )
 
 
 class BillDetailsSpider(StoryousSpider):
@@ -94,10 +104,6 @@ class BillDetailsSpider(StoryousSpider):
         bill_detail = response.json()
         self._database.insert(bill_detail)
 
-    def errback(self, response):
-        if response.value.response.status == 401:
-            raise CloseSpider('Session  limit reached')
-
     def __get_urls(self) -> List:
         # Load bills databases
         bills_db = self._get_database('data/raw/bills.json')
@@ -112,7 +118,8 @@ class BillDetailsSpider(StoryousSpider):
             for bill_id in available_bill_ids
             if bill_id not in scraped_bill_ids
         ]
-        return urls
+        # Invert to scrape the newest bills
+        return urls[::-1]
 
 
 if __name__ == '__main__':
